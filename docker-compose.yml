@@ -15,6 +15,7 @@ services:
       RABBITMQ__USER: guest
       RABBITMQ__PASS: guest
       ASPNETCORE_URLS: http://+:8080
+      JWT__KEY: "dev-local-change-me"
     ports: ["8080:8080"]
     depends_on:
       rabbitmq: { condition: service_healthy }
