@@ -9,6 +9,8 @@ using Microsoft.IdentityModel.JsonWebTokens;
 using System.Security.Claims;
 using Serilog;
 using Prometheus;
+using Microsoft.AspNetCore.RateLimiting;
+using System.Threading.RateLimiting;
 
 // Logs JSON compactos (listos para ELK/DataDog)
 Log.Logger = new LoggerConfiguration()
@@ -38,12 +40,25 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
   });
 builder.Services.AddAuthorization();
 
+// Rate limiting básico para /orders
+builder.Services.AddRateLimiter(o =>
+{
+    o.AddFixedWindowLimiter("orders", options =>
+    {
+        options.PermitLimit = 20;                    // 20 solicitudes
+        options.Window = TimeSpan.FromSeconds(10);   // por cada 10s
+        options.QueueLimit = 5;                      // cola corta
+        options.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+    });
+});
+
 var app = builder.Build();
 
 app.UseSwagger();
 app.UseSwaggerUI();
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 /* MÉTRICAS HTTP */
 app.UseHttpMetrics();          // <-- cuenta latencias, códigos, etc.
@@ -123,6 +138,8 @@ app.MapPost("/orders",
 .WithName("CreateOrder")
 .Produces(StatusCodes.Status202Accepted)
 .Produces(StatusCodes.Status400BadRequest)
-.Produces(StatusCodes.Status401Unauthorized);
+.Produces(StatusCodes.Status401Unauthorized)
+.Produces(StatusCodes.Status429TooManyRequests)
+.RequireRateLimiting("orders");
 
 app.Run();
