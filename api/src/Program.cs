@@ -8,6 +8,7 @@ using Microsoft.IdentityModel.Tokens;
 using Microsoft.IdentityModel.JsonWebTokens;
 using System.Security.Claims;
 using Serilog;
+using Prometheus;
 
 // Logs JSON compactos (listos para ELK/DataDog)
 Log.Logger = new LoggerConfiguration()
@@ -43,6 +44,12 @@ app.UseSwagger();
 app.UseSwaggerUI();
 app.UseAuthentication();
 app.UseAuthorization();
+
+/* MÉTRICAS HTTP */
+app.UseHttpMetrics();          // <-- cuenta latencias, códigos, etc.
+app.MapMetrics("/metrics")     // <-- endpoint de scrape
+   .WithTags("Metrics");
+
 
 app.MapMethods("/token", new[] { "GET", "POST" }, () =>
 {
