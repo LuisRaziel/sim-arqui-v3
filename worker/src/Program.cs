@@ -1,11 +1,14 @@
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
-using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using Serilog;
 using System.Diagnostics;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Serilog.Context;
+using Prometheus;
 
 // ===== Bootstrap de logs JSON compactos (listo para ELK/Datadog) =====
 Log.Logger = new LoggerConfiguration()
@@ -68,6 +71,42 @@ static int GetRetryCount(IBasicProperties? props)
     catch { return 0; }
 }
 
+// ===== Health endpoint HTTP simple (puerto 8081) =====
+var healthBuilder = WebApplication.CreateBuilder();
+var healthApp = healthBuilder.Build();
+
+var ordersProcessedCounter = Metrics.CreateCounter(
+    "orders_processed_total",
+    "Total de órdenes procesadas por el worker"
+);
+
+var ordersFailedCounter = Metrics.CreateCounter(
+    "orders_failed_total",
+    "Total de órdenes fallidas"
+);
+
+healthApp.MapGet("/live", () => Results.Ok(new { status = "alive" }));
+
+healthApp.MapGet("/health", () =>
+{
+    try
+    {
+        healthApp.MapMetrics();
+        var factory = new ConnectionFactory { HostName = host, UserName = user, Password = pass };
+        using var conn = factory.CreateConnection();
+        using var ch = conn.CreateModel();
+        return Results.Ok(new { status = "ready", broker = "connected" });
+    }
+    catch (Exception ex)
+    {
+        Serilog.Log.Warning(ex, "health_check_failed");
+        return Results.Json(new { status = "unhealthy", broker = "disconnected", error = ex.Message }, statusCode: 503);
+    }
+});
+
+_ = Task.Run(() => healthApp.Run("http://0.0.0.0:8081"));
+Serilog.Log.Information("worker_health_endpoint_started port=8081");
+
 // ===== Heartbeat de vida (útil en Docker/K8s) =====
 _ = Task.Run(async () =>
 {
@@ -87,8 +126,8 @@ while (true)
             HostName = host,
             UserName = user,
             Password = pass,
-            DispatchConsumersAsync = true,           // necesario para AsyncEventingBasicConsumer
-            AutomaticRecoveryEnabled = true,         // reconexión automática
+            DispatchConsumersAsync = true,
+            AutomaticRecoveryEnabled = true,
             NetworkRecoveryInterval = TimeSpan.FromSeconds(5),
             RequestedHeartbeat = TimeSpan.FromSeconds(30)
         };
@@ -96,7 +135,7 @@ while (true)
         using var connection = factory.CreateConnection();
         using var channel = connection.CreateModel();
 
-        // Topología (durable, sin autodelete)
+        // Topología
         channel.ExchangeDeclare(exchange,    type: "topic",  durable: true, autoDelete: false);
         channel.ExchangeDeclare(dlxExchange, type: "fanout", durable: true, autoDelete: false);
 
@@ -128,24 +167,51 @@ while (true)
                 var orderId = root.GetProperty("orderId").GetGuid().ToString();
                 var amount  = root.GetProperty("amount").GetDecimal();
 
-                Serilog.Log.Information("order_processing {OrderId} {Amount} {MessageId} {DeliveryTag}",
-                    orderId, amount, messageId, ea.DeliveryTag);
-
-                var key = string.IsNullOrWhiteSpace(messageId) ? orderId : messageId;
-                if (!TryMarkProcessed(key))
+                // Extraer correlationId PRIMERO
+                string? correlationId = null;
+                if (root.TryGetProperty("correlationId", out var cidEl))
                 {
-                    Serilog.Log.Information("duplicate_ignored {Key} {DeliveryTag}", key, ea.DeliveryTag);
-                    channel.BasicAck(ea.DeliveryTag, false);
-                    return;
+                    correlationId = cidEl.GetString();
+                }
+                if (string.IsNullOrWhiteSpace(correlationId))
+                {
+                    correlationId = ea.BasicProperties?.CorrelationId;
+                }
+                if (string.IsNullOrWhiteSpace(correlationId)
+                    && ea.BasicProperties?.Headers != null
+                    && ea.BasicProperties.Headers.TryGetValue("X-Correlation-Id", out var raw))
+                {
+                    correlationId = raw switch
+                    {
+                        byte[] b => Encoding.UTF8.GetString(b),
+                        ReadOnlyMemory<byte> mem => Encoding.UTF8.GetString(mem.ToArray()),
+                        string s => s,
+                        _ => null
+                    };
                 }
 
-                // Simula trabajo
-                await Task.Delay(50);
+                // AHORA envolver con LogContext
+                using (LogContext.PushProperty("CorrelationId", correlationId ?? "n/a"))
+                {
+                    Serilog.Log.Information("order_processing {OrderId} {Amount} {MessageId} {DeliveryTag}",
+                        orderId, amount, messageId, ea.DeliveryTag);
 
-                channel.BasicAck(ea.DeliveryTag, false);
+                    var key = string.IsNullOrWhiteSpace(messageId) ? orderId : messageId;
+                    if (!TryMarkProcessed(key))
+                    {
+                        Serilog.Log.Information("duplicate_ignored {Key} {DeliveryTag}", key, ea.DeliveryTag);
+                        channel.BasicAck(ea.DeliveryTag, false);
+                        return;
+                    }
 
-                var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-                Serilog.Log.Information("order_processed {OrderId} {ElapsedMs}", orderId, elapsedMs);
+                    // Simula trabajo
+                    await Task.Delay(50);
+
+                    channel.BasicAck(ea.DeliveryTag, false);
+
+                    var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+                    Serilog.Log.Information("order_processed {OrderId} {ElapsedMs}", orderId, elapsedMs);
+                }
             }
             catch (Exception ex)
             {
@@ -154,7 +220,8 @@ while (true)
                 if (retries + 1 >= maxRetries)
                 {
                     Serilog.Log.Error(ex, "worker_error_to_dlq {DeliveryTag} {Retries}", ea.DeliveryTag, retries + 1);
-                    channel.BasicReject(ea.DeliveryTag, requeue: false); // a DLQ
+                    ordersFailedCounter.Inc();
+                    channel.BasicReject(ea.DeliveryTag, requeue: false);
                 }
                 else
                 {
@@ -174,12 +241,14 @@ while (true)
 
         channel.BasicConsume(queue, autoAck: false, consumer);
 
+        Serilog.Log.Information("worker_consuming queue={Queue} prefetch={Prefetch}", queue, prefetch);
+
         // Mantener hilo vivo
         await Task.Delay(Timeout.Infinite);
     }
     catch (Exception ex)
     {
-        Serilog.Log.Error(ex, "worker_error_processing");
-        await Task.Delay(TimeSpan.FromSeconds(5)); // backoff
+        Serilog.Log.Error(ex, "worker_broker_connection_failed host={Host}", host);
+        await Task.Delay(TimeSpan.FromSeconds(5));
     }
 }

@@ -11,6 +11,7 @@ using Serilog;
 using Prometheus;
 using Microsoft.AspNetCore.RateLimiting;
 using System.Threading.RateLimiting;
+using Api.Middleware;
 
 // Logs JSON compactos (listos para ELK/DataDog)
 Log.Logger = new LoggerConfiguration()
@@ -40,13 +41,16 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
   });
 builder.Services.AddAuthorization();
 
-// Rate limiting básico para /orders
+// Rate limiting configurable por entorno
+var permitLimit = int.TryParse(builder.Configuration["RATELIMIT__PERMIT_LIMIT"], out var pl) ? pl : 20;
+var windowSeconds = int.TryParse(builder.Configuration["RATELIMIT__WINDOW_SECONDS"], out var ws) ? ws : 10;
+
 builder.Services.AddRateLimiter(o =>
 {
     o.AddFixedWindowLimiter("orders", options =>
     {
-        options.PermitLimit = 20;                    // 20 solicitudes
-        options.Window = TimeSpan.FromSeconds(10);   // por cada 10s
+        options.PermitLimit = permitLimit;
+        options.Window = TimeSpan.FromSeconds(windowSeconds);
         options.QueueLimit = 5;                      // cola corta
         options.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
     });
@@ -54,8 +58,17 @@ builder.Services.AddRateLimiter(o =>
 
 var app = builder.Build();
 
+// Métricas personalizadas
+var ordersPublishedCounter = Metrics.CreateCounter(
+    "orders_published_total", 
+    "Total de órdenes publicadas vía API"
+);
+
 app.UseSwagger();
 app.UseSwaggerUI();
+
+app.UseMiddleware<CorrelationIdMiddleware>();
+
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseRateLimiter();
@@ -93,13 +106,18 @@ app.MapMethods("/token", new[] { "GET", "POST" }, () =>
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 app.MapPost("/orders",
-    [Microsoft.AspNetCore.Authorization.Authorize] (CreateOrderRequest request) =>
+    [Microsoft.AspNetCore.Authorization.Authorize] (HttpContext ctx, CreateOrderRequest request) =>
 {
 
     if (request.OrderId == Guid.Empty || request.Amount <= 0)
     return Results.BadRequest(new { message = "Invalid payload" });
 
     Serilog.Log.Information("order_received {OrderId} {Amount}", request.OrderId, request.Amount);
+    
+    var correlationId =
+    (ctx.Items["CorrelationId"] as string)
+    ?? ctx.Request.Headers["X-Correlation-Id"].FirstOrDefault()
+    ?? Guid.NewGuid().ToString("N");
 
     var host = Environment.GetEnvironmentVariable("RABBITMQ__HOST") ?? "localhost";
     var user = Environment.GetEnvironmentVariable("RABBITMQ__USER") ?? "guest";
@@ -108,7 +126,13 @@ app.MapPost("/orders",
     const string exchange = "orders.exchange";
     const string routingKey = "orders.created";
 
-    var envelope = new { messageId = Guid.NewGuid(), request.OrderId, request.Amount, createdAt = DateTime.UtcNow };
+    var envelope = new {
+        messageId   = Guid.NewGuid(),
+        correlationId,
+        request.OrderId,
+        request.Amount,
+        createdAt   = DateTime.UtcNow
+    };
     var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(envelope));
 
     try
@@ -123,9 +147,13 @@ app.MapPost("/orders",
         props.ContentType = "application/json";
         props.DeliveryMode = 2; // persistente
         props.MessageId = envelope.messageId.ToString();
+        props.CorrelationId = correlationId;
+        props.Headers ??= new Dictionary<string, object>();
+        props.Headers["X-Correlation-Id"] = correlationId;
 
-        channel.BasicPublish(exchange: exchange, routingKey: routingKey, basicProperties: props, body: body);
+        channel.BasicPublish(exchange: exchange, routi<ngKey: routingKey, basicProperties: props, body: body);
         Serilog.Log.Information("order_published {OrderId}", request.OrderId);
+        ordersPublishedCounter.Inc();
         return Results.Accepted($"/orders/{request.OrderId}", new { status = "queued", request.OrderId });
     }
     catch

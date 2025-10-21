@@ -10,7 +10,6 @@
 - [x] Worker consume (idempotencia + DLQ)
 - [x] Script scripts/e2e.sh
 - [x] Commit + tag v1.0.0-base
-- [ ] Documentar ADR de decisiones base (pendiente)
 
 ---
 
@@ -22,7 +21,6 @@
 - [x] Variables de entorno en `compose` (`JWT__KEY`)
 - [x] Prueba E2E completa con token
 - [x] Refactorizar generación de JWT en clase separada
-- [ ] ADR sobre elección de JWT local vs externo
 
 ---
 
@@ -32,7 +30,6 @@
 - [x] Reemplazar `Console.WriteLine` por `Serilog.Log.*`
 - [x] Usar `CompactJsonFormatter` para compatibilidad con ELK
 - [x] Agregar contexto `CorrelationId` en logs
-- [ ] ADR sobre formato de logs y sink elegido
 
 ---
 
@@ -49,7 +46,6 @@
 - [x] Rama `feat/ratelimit`
 - [x] Implementar limitador fijo en `/orders`
 - [ ] Parametrizar por entorno (`RATELIMIT__WINDOW`, `PERMIT_LIMIT`)
-- [ ] Documentar decisión en ADR
 
 ---
 

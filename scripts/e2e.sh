@@ -49,11 +49,33 @@ for i in {1..40}; do
 done
 echo
 
+echo "== 5.1) Obtener token JWT (sin jq) =="
+TOKEN_JSON=$(curl -sS http://localhost:8080/token)
+# Extraer con sed el valor de "token"
+TOKEN=$(echo "$TOKEN_JSON" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+if [[ -z "${TOKEN:-}" ]]; then
+  echo "❌ No se pudo extraer token de /token. Respuesta: $TOKEN_JSON"
+  exit 1
+fi
+echo "Token obtenido ✅"
+echo
+
+echo "== 5.5) Obtener token JWT =="
+TOKEN_JSON=$(curl -sS http://localhost:8080/token)
+TOKEN=$(echo "$TOKEN_JSON" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+if [[ -z "${TOKEN:-}" ]]; then
+  echo "❌ No se pudo extraer token. Respuesta: $TOKEN_JSON"
+  exit 1
+fi
+echo "✅ Token obtenido"
+echo
+
 echo "== 6) Probar POST /orders =="
 OID=$(uuidgen 2>/dev/null || echo 11111111-1111-1111-1111-111111111111)
 set -x
 curl -i -X POST http://localhost:8080/orders \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
   -d "{\"orderId\":\"$OID\",\"amount\":123.45}"
 set +x
 echo

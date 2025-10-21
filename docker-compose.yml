@@ -15,6 +15,8 @@ services:
       RABBITMQ__USER: guest
       RABBITMQ__PASS: guest
       ASPNETCORE_URLS: http://+:8080
+      RATELIMIT__PERMIT_LIMIT: "50"
+      RATELIMIT__WINDOW_SECONDS: "60"
       JWT__KEY: "dev-local-change-me"
     ports: ["8080:8080"]
     depends_on:
@@ -28,5 +30,6 @@ services:
       RABBITMQ__PASS: guest
       WORKER__PREFETCH: "10"
       WORKER__RETRYCOUNT: "3"
+    ports: ["8081:8081"]
     depends_on:
       rabbitmq: { condition: service_healthy }
