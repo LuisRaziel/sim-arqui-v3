@@ -7,8 +7,16 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.IdentityModel.JsonWebTokens;
 using System.Security.Claims;
+using Serilog;
+
+// Logs JSON compactos (listos para ELK/DataDog)
+Log.Logger = new LoggerConfiguration()
+    .Enrich.FromLogContext()
+    .WriteTo.Console(new Serilog.Formatting.Compact.CompactJsonFormatter())
+    .CreateLogger();
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Host.UseSerilog();
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c => c.SwaggerDoc("v1", new OpenApiInfo { Title = "Orders API", Version = "v1" }));
@@ -65,8 +73,11 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 app.MapPost("/orders",
     [Microsoft.AspNetCore.Authorization.Authorize] (CreateOrderRequest request) =>
 {
+
     if (request.OrderId == Guid.Empty || request.Amount <= 0)
     return Results.BadRequest(new { message = "Invalid payload" });
+
+    Serilog.Log.Information("order_received {OrderId} {Amount}", request.OrderId, request.Amount);
 
     var host = Environment.GetEnvironmentVariable("RABBITMQ__HOST") ?? "localhost";
     var user = Environment.GetEnvironmentVariable("RABBITMQ__USER") ?? "guest";
@@ -92,11 +103,13 @@ app.MapPost("/orders",
         props.MessageId = envelope.messageId.ToString();
 
         channel.BasicPublish(exchange: exchange, routingKey: routingKey, basicProperties: props, body: body);
+        Serilog.Log.Information("order_published {OrderId}", request.OrderId);
         return Results.Accepted($"/orders/{request.OrderId}", new { status = "queued", request.OrderId });
     }
     catch
     {
         // Fallback: permite probar la API aunque no haya broker
+        Serilog.Log.Warning("broker_unavailable_simulated_publish {OrderId}", request.OrderId);
         return Results.Accepted($"/orders/{request.OrderId}", new { status = "simulated", request.OrderId });
     }
 })
