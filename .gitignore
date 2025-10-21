@@ -1,0 +1,11 @@
+bin/
+obj/
+out/
+**/publish/
+*.pdb
+*.log
+.vscode/
+.vs/
+docker-compose.override.yml
+.DS_Store
+.env
